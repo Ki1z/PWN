@@ -825,13 +825,13 @@ int main() {
 | ------------------ | -------- | ---------- | ------------------------------------------------ |
 | process            | str      | object     | 连接本地的程序，并挂载到本地端口，返回程序控制流 |
 | remote             | str      | object     | 连接到远程端口，返回程序控制流                   |
-| Object.recv        | None     | None       | 接收程序发送的信息                               |
-| Object.recvline    | None     | None       | 接收一条程序发送的信息                           |
+| Object.recv        | None     | bytes      | 接收程序发送的信息                               |
+| Object.recvline    | None     | bytes      | 接收一条程序发送的信息                           |
 | Object.send        | byte     | None       | 发送字节流到程序                                 |
 | Object.sendline    | byte     | None       | 发送一条字节流到程序                             |
 | Object.interactive | None     | None       | 切换到交互模式，即getshell                       |
-| p32                | int      | byte       | 将整型转换为32位byte                             |
-| p64                | int      | byte       | 将整型转换为64位byte                             |
+| p32                | int      | bytes      | 将整型转换为32位byte                             |
+| p64                | int      | bytes      | 将整型转换为64位byte                             |
 
 - **pwndbg**
 
@@ -852,16 +852,22 @@ int main() {
 
 **NX `the no-execute bits`**
 
-栈缓冲区不可执行，编译时生效，通过在内存页的标识中添加“执行”位，可以表示该内存页是否可以执行，若程序代码的`eip`执行至不可运行的内存页，则cpu将直接拒绝执行“指令”，造成程序崩溃
+栈不可执行，编译时生效，通过在内存页的标识中添加“执行”位，可以表示该内存页是否可以执行，若程序代码的`eip`执行至不可运行的内存页，则cpu将直接拒绝执行“指令”，造成程序崩溃
 
 **ASLR `address space layout randomization`**
 
 地址空间布局随机化，通过随机化程序和库的内存地址，ASLR 增加了攻击者猜测或预测内存位置的难度，从而防止了一些常见的攻击方式。ASLR 的核心原理是当程序或库加载到内存中时，其地址空间不会是固定的，而是会随机变化。这意味着每次程序启动时，它的代码段、堆、栈等内存区域的地址都不同，从而大大提高了攻击者利用内存漏洞进行攻击的难度
 
+**PIE `position-independent executable`**
+
+地址无关可执行文件，该技术是一个针对代码段`.text`、数据段`.data`、未初始化全局变量段`.bss`等固定地址的一个防护技术，如果程序开启了PIE保护的话，在每次加载程序时都变换加载地址
+
 - **ROPgadget**
 - **one_gadget**
 
 ### ret2text
+
+#### 攻击流程
 
 *此处使用`NewStarCTF公开赛`的`ret2text`文件*
 
@@ -875,9 +881,9 @@ int main() {
 
    > <img src="./img/31.png">
 
-   `buf`缓冲区仅有32字节，而`read()`函数写入了256字节，存在栈溢出漏洞
+   `buf`缓冲区仅有32字节，而`read()`函数能写入256字节，因此存在栈溢出漏洞
 
-3. 寻找攻击点
+3. 寻找后门
 
    > <img src="./img/32.png">
 
@@ -931,3 +937,66 @@ int main() {
 
 具体步骤是将栈帧上的函数返回地址更改为攻击者手动传入的shellcode所在的缓冲区地址，初期往往直接将shellcode写入栈缓冲区，但是目前由于NX保护措施，栈缓冲区不可执行，因此当下常用的手段变为向bss缓冲区或者堆缓冲区内写入shellcode，并使用mprotect赋予其执行权限
 
+#### 图解
+
+> <img src="./img/39.png">
+
+#### shellcode
+
+`shellcode`是传入程序内部执行的代码，必须是机器码，因此需要借助一些工具来编写`shellcode`
+
+**pwntools中的shellcode**
+
+在`pwntools`中自带一个`shellcraft`包，提供了有关`shellcode`的方法和属性
+
+*注：在进行64位pwn攻击时，应当先加上`context.arch = 'amd64'`语句，将脚本环境设置为64位*
+
+| 方法名              | 参数类型 | 返回值类型 | 方法意义                   |
+| ------------------- | -------- | ---------- | -------------------------- |
+| shellcraft.sh       | None     | str        | 生成一段汇编shellcode      |
+| shellcraft.amd64.sh | None     | str        | 生成一段64位汇编shellcode  |
+| asm                 | str      | bytes      | 将一段汇编代码转换为机器码 |
+
+#### 攻击流程
+
+1. 查看保护措施
+
+   > <img src="./img/40.png">
+
+2. 使用`gdb`调试，在`main()`断点运行，查看内存信息，可以看出栈拥有`rwx`权限
+
+   > <img src="./img/41.png">
+
+3. 使用`IDA`寻找漏洞点
+   ```c
+   int __cdecl main(int argc, const char **argv, const char **envp)
+   {
+     char s[100]; // [esp+1Ch] [ebp-64h] BYREF
+   
+     setvbuf(stdout, 0, 2, 0);
+     setvbuf(stdin, 0, 1, 0);
+     puts("No system for you this time !!!");
+     gets(s);
+     strncpy(buf2, s, 0x64u);
+     printf("bye bye ~");
+     return 0;
+   }
+   ```
+
+   `main()`函数中使用`gets()`接收了一段用户输入，并将该输入拷贝到了缓冲区`buf2`，而这里的`buf2`缓冲区存在于`.bss`段
+
+   > <img src="./img/42.png">
+
+   这里的`buf2`地址为`0x0804A080`，而服务器上的`buf2`地址同样位于该地址，并且该题没有启用`NX`保护，因此可以作为攻击点写入`shellcode`
+
+4. 使用`gdb`进行动态调试，计算溢出数据长度，先在`main()`处断点运行，然后步过到`gets()`函数，输入合法长度，并查看栈帧
+
+   > <img src="./img/43.png">
+   >
+   > 
+
+   这里需要计算一下，因为`ebp`并没有直接显示，图中可以看到绝对偏移值从`19:0064`变化为了`23:008c`，而相对偏移值从`-024`变化为了`+004`，因此可以计算得出`ebp`的绝对偏移值为`0x8c - 0x4 = 0x88`，然后计算从局部变量到`ebp`的长度，即`0x88 - eax(0x1c) = 0x6c`，即108字节，同时不要忘记`ebp`本身的4字节
+
+   5. 构造`payload`
+
+   
