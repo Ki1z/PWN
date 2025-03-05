@@ -1496,3 +1496,164 @@ io.interactive()
 8. 执行脚本，完成攻击
 
 > <img src="./img/63.png">
+
+### 动态链接
+
+#### 动态链接与静态链接
+
+假设有以下c语言文件
+
+```c
+#include <stdio.h>
+
+int main() {
+	char str[100];
+	puts("Ki1z's PWN notes");
+	gets(str);
+	return 0;
+}
+```
+
+我们编译为两个程序，动态链接程序`dynamic`和静态链接程序`static`
+
+```sh
+gcc -no-pie -o dynamic test.c
+```
+
+```sh
+gcc -no-pie --static -o static test.c
+```
+
+首先来观察两个文件的不同，使用`file`命令
+
+**dynamic**
+
+```sh
+kiiz@vm:~/桌面$ file dynamic 
+dynamic: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=39b621c54dfc3f2ff1ce302fba8655c4dcc5d7fa, for GNU/Linux 3.2.0, not stripped
+```
+
+**static**
+
+```sh
+kiiz@vm:~/桌面$ file static 
+static: ELF 64-bit LSB executable, x86-64, version 1 (GNU/Linux), statically linked, BuildID[sha1]=b658bbc21d4e0c7a648f4af4b6f19f323827e5a9, for GNU/Linux 3.2.0, not stripped
+```
+
+`dynamic`文件中明确指明了`dynamically linked`动态链接，后面紧跟装载器`/lib64/ld-linux-x86-64.so.2`，再来对比文件大小
+
+> <img src="./img/65.png">
+
+可以看到，`dynamic`文件大小仅为`16K`，而`static`占用`789K`
+
+> <img src="./img/66.png">
+
+如图，两个程序的执行结果完全一致，下面通过`IDA`来进行对比
+
+**dynamic**
+
+> <img src="./img/67.png">
+
+**static**
+
+> <img src="./img/68.png">
+
+可以看出，静态链接的程序比动态链接的程序多出了很多函数，这是因为静态链接需要在程序编译时，将程序需要的所有链接库的函数拷贝到程序内部，当程序执行时，程序能直接从其内部调用必要的函数，而动态链接库则是在程序执行时，才将需要的函数拷贝进内存中，供程序调用
+
+#### 动态链接的相关结构
+
+下面，我们来了解一些动态链接文件独有的结构
+
+- `.dynamic`：段的一部分，存储了动态链接的关键信息，通常包含动态链接器所需的元数据，主要用于动态链接和运行时库加载
+- `link_map`：保存了进程载入的动态链接库的链表
+- `__dl_runtime_resolve`：装载器中用于解析动态链接库中函数的实际地址的函数
+- `.got`：段的一部分，存储了全局变量和函数的地址，在程序运行时由动态链接器填充
+- `.got.plt`：段的一部分，主要涉及动态链接过程中外部函数的地址，以及支持延迟绑定机制的数据。这些信息对于动态链接库的正确加载和使用至关重要
+
+#### 动态链接过程
+
+我们假设`libc`中存在一个名为`foo`的函数，下面我们来演示其动态链接过程
+
+```c
+#include <stdio.h>
+
+int main() {
+    foo();
+    return 0;
+}
+```
+
+1. 编译
+
+在编译程序后，会生成一段汇编代码，在汇编中，函数调用一般使用`call`命令，因此汇编代码中存在一行代码为`call foo@plt`
+
+2. `plt`表
+
+每一个在程序中被调用的动态链接库函数都会在plt中创建一个表项，因此当程序第一次调用动态链接库中的函数时，需要先到`plt`表查询该函数地址，代码实现为`foo@plt`
+
+3. `foo@plt`
+
+在该表项中，会执行以下代码
+
+```assembly
+jmp *(foo@GOT)
+push index
+jmp PLT0
+```
+
+- `jmp *(foo@GOT)`：先跳转到`got`表，试图在`got`表中寻找函数真实地址，由于这是程序第一次调用`foo`函数，`got`表中并不存在该地址，因此程序返回`plt`表
+- `push index`：为`__dl_runtime_resolve`传参，指定需要解析的函数
+- `jmp PLT0`：跳转到`plt`头部，将要执行`__dl_runtime_resolve`来解析`foo`的真实地址
+
+4. `PLT0`
+
+在`PLT0`中程序会执行如下代码
+
+```assembly
+push *(GOT+4)
+jmp *(GOT+8)
+```
+
+- `push *(GOT+4)`：为`__dl_runtime_resolve`传参，指定`foo`所在的动态链接库
+- `jmp *(GOT+8)`：跳转到`__dl_runtime_resolve`所在位置
+
+5. 解析函数真实地址
+
+程序在`__dl_runtime_resolve`函数中解析`foo`函数的真实地址，并将解析结果返回`.got.plt`中
+
+6. 第二次调用
+
+下面假设程序进行第二次调用`foo`，程序到`plt`表，然后到`got`表，此时`got`表中已经存放了函数真实地址，因此程序直接跳转到`foo`的真实地址执行
+
+#### 示例
+
+下面我们来演示一下`puts`函数的动态链接过程
+
+```c
+#include <stdio.h>
+
+int main() {
+	int a;
+	puts("First");
+	a = 0;
+	puts("Second");
+	return 0;
+}
+```
+
+1. `gdb`动态调试程序，在`main()`断点运行，然后查看`got`表内容
+
+> <img src="./img/69.png">
+
+可以看出，在程序未调用`puts()`函数之前，`got`表中存储的地址实际是`plt`表的地址
+
+> <img src="./img/70.png">
+
+2. 步过第一个`puts()`，查看`got`表
+
+> <img src="./img/71.png">
+
+可以看出，此时程序已经完成了`puts()`函数的地址解析，`got`表储存的是`puts()`函数的真实地址
+
+### ret2libc1
+
