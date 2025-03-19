@@ -1,6 +1,6 @@
 # pwn basic
 
-`更新时间：2025-3-18`
+`更新时间：2025-3-19`
 
 注释解释：
 
@@ -2026,8 +2026,7 @@ print(puts_addr - system_addr)
 
 - 首先第一次栈溢出，返回地址`put@plt`，让程序执行`puts()`，参数为`puts@got`，带出`puts()`的实际地址
 - 然后程序需要返回`main()`函数，因为我们得到`puts()`的地址后，程序会继续进行下去，如果此时不返回`main()`函数，而是直接停止执行，那么得到的`puts()`函数的地址将没有任何意义
-- 程序返回`main()`函数重新执行，然后进行第二次栈溢出，第二次栈溢出与第一次有些不同，因为在第一次栈溢出时，我们将`ebp`用`b'aaaa'`进行了覆盖，程序返回到`puts()`后，`ebp`的内容错误，导致`b'aaaa'`没有被弹出栈，后续我们又传入了参数`puts_got`，该参数也没有被弹出栈，因此第二次栈溢出需要的垃圾数据长度要少8个字节
-
+- 程序返回`main()`函数重新执行，然后进行第二次栈溢出，第二次栈溢出与第一次有些不同，因为`_start`函数有一句`and esp, 0FFFFFFF0h`进行了堆栈平衡，在`and`语句之前，esp的值是`0xffffade8`，而经过`and`之后，esp的值就变为了`0xffffade0`。所以问题就出在 `_start`函数的`and`语句，要是直接返回`main`函数就相当于少了一个`and`操作，`esp`的位置也就多了8，因此第二次溢出只需要104字节
 - 然后程序返回`system()`，调用`"/bin/sh"`，最终`getshell`
 
 ```py
@@ -2082,3 +2081,68 @@ sh.interactive()
 2. `pop_ret`
 
 对于普通`payload`，例如`payload = flat([cyclic(0x88), callsystem])`，`callsystem`是直接覆盖了子函数的返回地址，这里我们可以直接插入一个`ret`，如`payload = flat([cyclic(0x88), ret, callsystem])`，执行`ret`后，栈上的`callsystem`地址就被弹入了`rip`，然后返回`callsystem`，这样栈上就能少8个字节，栈就会是对齐状态
+
+## ret2csu
+
+`ret2csu`并不是一种题型，而是一种中级`ROP`方法，即在64位题目中，需要给指定函数传递多个参数，而`gadget`又无法满足传参需求，因此需要使用`__libc_csu_init`函数中的某些片段来达到传参的目的
+
+一般来说，需要使用的函数片段为以下两块
+
+**gadget1**
+
+```assembly
+.text:00000000004006AA                 pop     rbx
+.text:00000000004006AB                 pop     rbp
+.text:00000000004006AC                 pop     r12
+.text:00000000004006AE                 pop     r13
+.text:00000000004006B0                 pop     r14
+.text:00000000004006B2                 pop     r15
+.text:00000000004006B4                 retn
+```
+
+**gadget2**
+
+```assembly
+.text:0000000000400690                 mov     rdx, r13
+.text:0000000000400693                 mov     rsi, r14
+.text:0000000000400696                 mov     edi, r15d
+.text:0000000000400699                 call    ds:(__frame_dummy_init_array_entry - 600840h)[r12+rbx*8]
+.text:000000000040069D                 add     rbx, 1
+.text:00000000004006A1                 cmp     rbx, rbp
+.text:00000000004006A4                 jnz     short loc_400690
+```
+
+在`gadget2`中可以看到，程序将`r13`的值传递给了`rdx`，将`r14`的值传递给了`rsi`，还将`r15`的低位传递给了`rdi`的低位`edi`，因此，`r13`、`r14`、`r15`均可看作是直接对`rdx`、`rsi`和`rdi`赋值
+
+因此，我们先让程序跳转到`gadget1`的开头位置，然后依次传参，通过`gadget1`的`retn`返回`gadget2`，让`r13`、`r14`、`r15`向`rdx`、`rsi`和`rdi`赋值
+
+然后程序执行`call [r12 + rbx * 8]`，为了让`call`指令能直接跳转到我们想要的函数处，可以直接在`gadget1`中将其设置为0，接着程序继续向下执行，遇到`add rbx, 1`和`cmp rbx, rbp`，此时需要`rbx`的值等于`rbp`的值，程序才能继续执行，上文指出，我们已经将`rbx`的值设置为了0，然后经过`add rbx, 1`后变成了1，只需要将`rbp`也设置为1，就能让程序继续执行
+
+需要注意的是`r12`的内容必须是一个指针，即必须是指向其他地址的地址，因此一般使用`got`表项的地址。如果`r12`不需要调用函数，可以用对栈没有影响的函数代替，比如`__init_array_start`函数
+
+因为`gadget2`位于`gadget1`的低地址，因此程序离开`gadget2`后，又会执行一次`gadget1`，此时所有的赋值都没有任何意义，因此我们直接用垃圾数据填充
+
+```assembly
+.text:0000000000400690 loc_400690:                             ; CODE XREF: __libc_csu_init+54↓j
+.text:0000000000400690                 mov     rdx, r13
+.text:0000000000400693                 mov     rsi, r14
+.text:0000000000400696                 mov     edi, r15d
+.text:0000000000400699                 call    ds:(__frame_dummy_init_array_entry - 600840h)[r12+rbx*8]
+.text:000000000040069D                 add     rbx, 1
+.text:00000000004006A1                 cmp     rbx, rbp
+.text:00000000004006A4                 jnz     short loc_400690
+.text:00000000004006A6
+.text:00000000004006A6 loc_4006A6:                             ; CODE XREF: __libc_csu_init+36↑j
+.text:00000000004006A6                 add     rsp, 8
+.text:00000000004006AA                 pop     rbx
+.text:00000000004006AB                 pop     rbp
+.text:00000000004006AC                 pop     r12
+.text:00000000004006AE                 pop     r13
+.text:00000000004006B0                 pop     r14
+.text:00000000004006B2                 pop     r15
+.text:00000000004006B4                 retn
+```
+
+可以看到从`.text:00000000004006A4`到`.text:00000000004006B4 `之间总共7个地址，因此填充`7 * 8 = 56`字节的垃圾数据，然后填入最后程序返回地址即可
+
+例题见<a href="./pwn_basic_practice.md">`pwn_basic_practice.md`</a>的`level3 amd64`
