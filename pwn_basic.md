@@ -1,6 +1,6 @@
 # pwn basic
 
-`更新时间：2025-3-20`
+`更新时间：2025-3-24`
 
 注释解释：
 
@@ -2179,3 +2179,107 @@ sh.interactive()
 
 ## 栈迁移
 
+对于之前的一些题目，程序给我们提供了足够大的溢出空间，让我们可以写入`ROP`链，但是有些题目限制了输入长度，因此我们需要栈迁移来将程序执行流（栈）转移到其他地方，如`.bss`段，然后利用`.bss`段已经预先准备好的`gadget`，最终达到攻击的目的
+
+**演示**
+
+假设栈结构
+
+| stack                 | stack pointer  |
+| --------------------- | -------------- |
+| father function frame |                |
+| ---                   |                |
+| ret addr              |                |
+| ---                   |                |
+| previous ebp          |                |
+| ---                   | <- current ebp |
+| son function frame    |                |
+| ---                   | <- current esp |
+
+子函数栈帧中存在栈溢出漏洞，但是向上溢出只能覆盖到`previous ebp`的位置，现在程序正常进行
+
+子函数在调用完成后，执行`leave`，首先执行`mov esp, ebp`
+
+| stack                 | stack pointer                  |
+| --------------------- | ------------------------------ |
+| father function frame |                                |
+| ---                   |                                |
+| ret addr              |                                |
+| ---                   |                                |
+| previous ebp          |                                |
+| ---                   | <- current ebp  <- current esp |
+
+然后执行`pop ebp`，将`previous ebp`弹入`current ebp`中
+
+| stack                      | stack pointer  |
+| -------------------------- | -------------- |
+| grandfather function frame |                |
+| ---                        | <- current ebp |
+| father function frame      |                |
+| ---                        |                |
+| ret addr                   |                |
+| ---                        | <- current esp |
+
+`leave`执行结束，栈回到了父栈帧，程序只需要执行`ret`即可将`eip`回到父函数
+
+现在假设我们更改了`previous ebp`，将其地址更改为了一块我们准备好攻击指令的地址
+
+程序子函数在调用完成后，执行`leave`，首先执行`mov esp, ebp`
+
+| stack                 | stack pointer                  |
+| --------------------- | ------------------------------ |
+| father function frame |                                |
+| ---                   |                                |
+| ret addr              |                                |
+| ---                   |                                |
+| attack addr           |                                |
+| ---                   | <- current ebp  <- current esp |
+
+因为我们将`previous ebp`改为了`attack addr`，因此`pop ebp`后，`ebp`被迁移到了`attack addr`
+
+| stack             | stack pointer  | attack addr    | attack pointer |
+| ----------------- | -------------- | -------------- | -------------- |
+| father func frame |                | attack command |                |
+| ---               |                | attack command |                |
+| ret addr          |                | attack command |                |
+| ---               | <- current esp | ---            | <- current ebp |
+
+然后程序执行`ret`，即`pop eip`，程序返回父函数
+
+| stack                  | stack pointer  | attack addr    | attack pointer |
+| ---------------------- | -------------- | -------------- | -------------- |
+| ---                    |                | attack command |                |
+| grandfather func frame |                | attack command |                |
+| ---                    |                | attack command |                |
+| father func frame      |                | attack command |                |
+| ---                    | <- current esp | attack command |                |
+| ret addr               |                | attack command |                |
+| ---                    |                | ---            | <- current ebp |
+
+在程序执行完成父函数后，准备返回爷函数
+
+| stack             | stack pointer  | attack addr    | attack pointer |
+| ----------------- | -------------- | -------------- | -------------- |
+| ---               |                | attack command |                |
+| father's ret addr |                | attack command |                |
+| ---               |                | attack command |                |
+| grandfather's ebp |                | attack command |                |
+| ---               | <- current esp | attack command |                |
+| father func frame |                | attack command |                |
+| ---               |                | ---            | <- current ebp |
+
+此时再次执行`leave`，即`mov esp, ebp`，又因为此时`ebp`位于`attack addr`，因此栈即被迁移到了`attack addr`
+
+| stack             | stack pointer | attack addr    | attack pointer                |
+| ----------------- | ------------- | -------------- | ----------------------------- |
+| ---               |               | attack command |                               |
+| father's ret addr |               | attack command |                               |
+| ---               |               | attack command |                               |
+| grandfather's ebp |               | attack command |                               |
+| ---               |               | attack command |                               |
+| father func frame |               | attack command |                               |
+| ---               |               | ---            | <- current ebp <- current esp |
+
+因为程序根据`esp`和`ebp`来分辨栈，所以`pop ebp`指令，被`pop`的数据将会是`attack addr`栈上的内容，此时就达到了攻击目的
+
+根据演示其实可以知道，如果需要进行栈迁移，其实需要两次`leave`指令，第一次迁移`ebp`，第二次迁移`esp`
