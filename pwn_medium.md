@@ -414,3 +414,75 @@ sh.interactive()
 执行脚本，成功`getshell`
 
 > <img src="./img0/25.png">
+
+### fmtstr2
+
+先进行反编译
+
+```c
+int __fastcall main(int argc, const char **argv, const char **envp)
+{
+  char v4; // [rsp+3h] [rbp-3Dh]
+  int i; // [rsp+4h] [rbp-3Ch]
+  int j; // [rsp+4h] [rbp-3Ch]
+  char *format; // [rsp+8h] [rbp-38h] BYREF
+  _IO_FILE *fp; // [rsp+10h] [rbp-30h]
+  const char *v9; // [rsp+18h] [rbp-28h]
+  _BYTE v10[24]; // [rsp+20h] [rbp-20h] BYREF
+  unsigned __int64 v11; // [rsp+38h] [rbp-8h]
+
+  v11 = __readfsqword(40u);
+  fp = fopen("flag.txt", "r");
+  for ( i = 0; i <= 21; ++i )
+    v10[i] = _IO_getc(fp);
+  fclose(fp);
+  v9 = v10;
+  puts("what's the flag");
+  fflush(_bss_start);
+  format = 0LL;
+  __isoc99_scanf("%ms", &format);
+  for ( j = 0; j <= 21; ++j )
+  {
+    v4 = format[j];
+    if ( !v4 || v10[j] != v4 )
+    {
+      puts("You answered:");
+      printf(format);
+      puts("\nBut that was totally wrong lol get rekt");
+      fflush(_bss_start);
+      return 0;
+    }
+  }
+  printf("That's right, the flag is %s\n", v9);
+  fflush(_bss_start);
+  return 0;
+}
+```
+
+这道题的程序比较长，但是主要作用很简单，是读取`flag.txt`的内容，存入`v10`字符数组，然后用`scanf()`接收用户输入，与`v10`的内容进行对比，如果内容一致，最终输出`flag`，任意字符不一致即输出错误
+
+很显然我们不可能通过正常途径获取`flag`，但是第28行中的`printf(format);`可以被我们利用
+
+现在进行动态调试，断点打在`printf(format)`，然后输入`AAAAAAAAA`，查看栈内容
+
+> <img src="./img0/26.png">
+
+图中可以看到我们输入的`AAAAAAA`地址位于`0x602ca0`，并不在栈中，为什么会这样？
+
+因为本题是一道64位程序，函数传参先通过寄存器传参
+
+> <img src="./img0/27.png">
+
+`rdi`和`rsi`此时都是`AAAAAAAA`，所以可以确定此时`printf()`正在传参，那么我们该如何读取栈中的内容呢？
+
+根据64位的传参规则，函数在传参时会依次调用`rdi`、`rsi`、`rdx`、`rcx`、`r8`、`r9`，然后就是栈，因此只需要输入`%6$p`就能读取栈上的内容，下面来验证我们的想法，我们重新动态调试程序，并输入`%p.%p.%p.%p.%p.%p.%p.%p.%p`
+
+> <img src="./img0/29.png">
+>
+> <img src="./img0/30.png">
+
+得到的结果是`'0x602480.(nil).0x7ffff7d26274.0xa.0x7.0x25000000.0x602ca0.0x6022a0.0x7fffffffdd50'`，现在来依次对照，注意第一个是`rsi`的值，因为格式化字符串本身是`rdi`的值，可以很明显地发现从第6个`%p`开始，程序就在读取栈上的内容了，而栈中`0x7fffffffdd48`的位置即存放的是`flag`，此地址是第9个`%p`，因此只需要输入`%9$s`即可将其解析为字符`flag`
+
+> <img src="./img0/31.png">
+
+注意这里不能使用`%10$s`，因为`%s`的参数是一个字符型指针，`0x7fffffffdd48`存放的是指针`0x7fffffffdd50`，而`0x7fffffffdd50`存放的才是数据，如果使用`%10$s`，程序就会将`0x7fffffffdd50`存放的`0x64786d7b67616c66`作为一个指针解析，从而导致程序崩溃 
