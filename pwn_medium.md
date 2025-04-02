@@ -486,3 +486,92 @@ int __fastcall main(int argc, const char **argv, const char **envp)
 > <img src="./img0/31.png">
 
 注意这里不能使用`%10$s`，因为`%s`的参数是一个字符型指针，`0x7fffffffdd48`存放的是指针`0x7fffffffdd50`，而`0x7fffffffdd50`存放的才是数据，如果使用`%10$s`，程序就会将`0x7fffffffdd50`存放的`0x64786d7b67616c66`作为一个指针解析，从而导致程序崩溃 
+
+## 堆
+
+堆是虚拟地址空间的一块连续线性区域，提供动态分配的内存，允许程序申请大小未知的内存
+
+堆在数据结构中是一个完全二叉树，即若二叉树的深度为h，则除第h层外，其他层的结点全部达到最大值，且第h层的所有结点都集中在左子树。堆是非线性数据结构，每次插入都是将数据插入到父节点，从这个新数据的父结点到根结点必然为一个有序的序列
+
+在C语言中，一般通过`malloc()`函数来获取一块堆区
+
+```c
+#include <stdio.h>
+
+int main() {
+	void* ptr = malloc(0x400);
+}   
+```
+
+上面的代码中，程序通过`malloc()`向内存中申请了`0x400`字节的内存空间，该内存空间的数据结构即是堆
+
+### 堆管理器
+
+堆管理器是位于用户与操作系统之间，作为动态内存管理的中间人。堆管理器可以响应用户的内存申请请求，向操作系统申请内存，然后将其返回给用户程序，管理用户所释放的内存，适时归还给操作系统，本质是动态链接库中的一段代码
+
+**常见的堆管理器**
+
+| 管理器   | 操作系统                  |
+| -------- | ------------------------- |
+| dlmalloc | General purpose allocator |
+| ptmalloc | glibc                     |
+| jemalloc | FreeBSD and Firefox       |
+| tcmalloc | Google                    |
+| libumem  | Solaris                   |
+
+### 堆管理器的系统调用
+
+上文中我们知道，堆管理器的本质是动态链接库中的一段代码，即属于用户态的代码，因此堆管理器无法直接分配内存空间，仍然需要向内核申请系统调用，常用的系统调用有两个，`brk`和`mmap`
+
+`brk`：主线程的系统调用，实质是将`data`段进行扩展
+
+`mmap`：在物理内存中开辟一块空间，映射到虚拟内存中
+
+主线程`brk`和`mmap`都可以使用，子线程只能使用`mmap`，较小区域使用`brk`，较大区域使用`mmap`
+
+### 堆管理器的工作方式
+
+#### arena
+
+arena是内存分配区，可以理解为堆管理器从系统申请到的内存池，用户向堆管理器申请的内存就位于arena中
+
+#### chunk
+
+当用户执行`malloc()`函数向堆管理器申请内存后，堆管理器就会将arena中的某块区域提供给用户，这块区域被称为chunk，chunk是内存分配的最小单位，一般来说，chunk的大小会大于实际申请的大小，`malloc()`函数返回的指针实际也是指向这个chunk的指针，`malloc()`函数申请的chunk被称为`malloc chunk`
+
+**malloc chunk**
+
+`malloc chunk`的结构一般是头部两个字长的控制信息`prev size`和`size`，后面紧跟数据体。`prev size`记录上一个chunk数据体的大小，`size`则记录该chunk控制信息和数据体总体的大小
+
+在`size`的低3比特还有三个控制字段，为什么是3比特？因为如果要申请一个chunk，不包含数据体的情况下，至少也需要两个字长来包含控制信息，在32位中两个字长最小为8字节，又因为chunk的大小必须是字长的整数倍，因此二进制`size`的低3位永远是0，为了避免资源浪费，所以使用`size`的低3位来描述额外的控制信息，这三个信息分别是`AMP`，`A`表示是否为主线程chunk，`M`表示是否位于`MMAP`段，`P`表示前一个chunk是否被分配
+
+在`malloc chunk`被`free()`函数释放内存后，堆管理器就会将其更改为`free chunk`结构，而不是直接返还给操作系统。因为每次针对系统硬件的操作都需要系统执行系统调用，而系统调用占用的资源往往很大，因此需要尽量减少系统调用的次数
+
+**free chunk**
+
+`free chunk`有多种结构，如`fastbin free chunk`、`smallbin free chunk`、`unsortbin free chunk`和`largebin free chunk`
+
+- `smallbin free chunk`：和`unsortbin free chunk`的结构类似，有四个字长的控制结构，后面紧跟数据体。四个字长的控制结构中，第一字长是`prev size`，第二字长是`size`，第三字长是`fd`指针，`fd`是`forward`的缩写，指向后一个`free chunk`，第四个字长是`bk`指针，`backward`的缩写，指向前一个`freechunk`
+
+- `largebin free chunk`：有六个字长的控制结构，除了`prev size`、`size`、`fd`、`bk`外，还有`fd_nextsize`和`bk_nextsize`
+
+- `fastbin free chunk`：只有三个字长的控制结构，`prev size`、`size`和`fd`
+
+**malloc chunk的实现**
+
+`malloc chunk`的C语言实现如下
+
+```c
+struct malloc_chunk {
+	INTERNAL_SIZE_T		prev_size;		/* Size of previous chunk (if free). */
+ 	INTERNAL_SIZE_T		size;		/* Size in bytes, including overhead. */
+    
+    struct malloc_chunk* fd;		/* double links -- used only if free. */
+    struct malloc_chunk* bk;
+    
+    /* Only used for large blocks: pointer to next large size. */
+    struct malloc_chunk* fd_nextsize;		/* double links -- used only if free. */
+    struct malloc_chunk* bk_nextsize;
+};
+```
+

